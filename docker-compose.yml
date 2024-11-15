@@ -1,0 +1,375 @@
+---
+services:
+  traefik:
+    image: traefik:v3.1
+    command:
+      - "--providers.docker"
+      - "--providers.docker.network=default"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.watch"
+      - "--providers.docker.useBindPortIp=true"
+      - "--entrypoints.web.address=:80"
+      - "--entryPoints.web.transport.respondingTimeouts.readTimeout=300s"
+      - "--entrypoints.web-secure.address=:443"
+      - "--entryPoints.web-secure.transport.respondingTimeouts.readTimeout=300s"
+      - "--providers.docker.httpClientTimeout=300"
+      - "--api.insecure"
+      - "--accesslog"
+      - "--log"
+      - "--providers.file.filename=/etc/traefik/dyn-traefik.yml"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "9081:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./container/traefik/traefik.yml:/etc/traefik/dyn-traefik.yml
+      - ./container/traefik/traefik.crt:/etc/ssl/docker.crt
+      - ./container/traefik/traefik.key:/etc/ssl/docker.key
+    network_mode: bridge
+  pia:
+    image: qmcgaw/gluetun
+    container_name: pia
+    init: true
+    privileged: true
+    ports:
+      - "9117:9117/tcp"
+      - "5076:5076/tcp"
+      - "8112:8112/tcp"
+      - "8888:8888/tcp"
+      - "8388:8388/tcp"
+      - "8388:8388/udp"
+      - "6767:6767/tcp"
+      - "7878:7878/tcp"
+      - "8989:8989/tcp"
+      - "8191:8191/tcp"
+      - "3306:3306/tcp"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    network_mode: bridge
+    volumes:
+      - ./container/gluetun:/gluetun
+    healthcheck: 
+      test: [ "CMD-SHELL", "/healthcheck.sh" ]
+      interval: 20s
+      timeout: 10s
+      start_period: 35s
+      retries: 3
+    environment:
+      REGION: "US West"
+      PROTOCOL: "udp"
+      OPENVPN_USER: ${PIA_USER}
+      DOT: "on"
+      OPENVPN_PASSWORD: ${PIA_PASSWORD}
+      BLOCK_MALICIOUS: "on"
+      BLOCK_SURVEILLANCE: "on"
+      VPNSP: "private internet access"
+      TZ: America/Los Angeles
+    restart: always
+
+  deluge:
+    image: linuxserver/deluge
+    container_name: deluge
+    depends_on:
+      - pia
+    environment:
+      PUID: 1000
+      PGID: 1000
+    volumes:
+      - ${DELUGE_CONFIG_DIR}:/config:rw
+      - ${DELUGE_DOWNLOADS_DIR}:/downloads:rw
+      - ${DELUGE_PARTIAL_DIR}:/partial:rw
+    network_mode: "service:pia"
+    restart: unless-stopped
+  jackett:
+    image: linuxserver/jackett
+    depends_on:
+      - pia
+      - flaresolverr
+    container_name: jackett
+    volumes:
+      - ${JACKETT_CONFIG_DIR}:/config:rw
+      - ${JACKETT_DOWNLOADS_DIR}:/downloads:rw
+      - ${TIMEZONE_FILE}:/etc/localtime:ro
+    environment:
+      PUID: 1000
+      PGID: 1000
+    network_mode: "service:pia"
+    restart: unless-stopped
+  sonarr:
+    image: linuxserver/sonarr
+    container_name: sonarr
+    depends_on:
+      - jackett
+      - deluge_frontend
+      - nzbget_frontend
+    environment:
+      PUID: 1000
+      PGID: 1000
+    volumes:
+      - ${TIMEZONE_FILE}:/etc/localtime:ro
+      - ${SONARR_DOWNLOADS_DIR}:/tv:rw
+      - ${SONARR_CONFIG_DIR}:/config:rw
+      - ${DELUGE_DOWNLOADS_DIR}:/downloads:rw
+      - ${DELUGE_PARTIAL_DIR}:/partial:rw
+      - /share/CACHEDEV1_DATA/Plex/Television:/share/CACHEDEV1_DATA/Plex/Television:rw
+    network_mode: "bridge"
+    restart: unless-stopped
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.sonarr_insecure.rule: "Host(`sonarr-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.sonarr_insecure.entrypoints: "web"
+      traefik.http.routers.sonarr.tls: "true"
+      traefik.http.routers.sonarr.rule: "Host(`sonarr-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.sonarr.entrypoints: "web-secure"
+      traefik.http.services.sonarr.loadbalancer.server.port: "8989"
+  radarr:
+    image: linuxserver/radarr
+    container_name: radarr
+    depends_on:
+      - jackett
+      - deluge_frontend
+      - nzbget_frontend
+    links:
+      - jackett
+      - deluge_frontend
+      - nzbget_frontend
+    environment:
+      PUID: 1000
+      PGID: 1000
+    volumes:
+      - ${TIMEZONE_FILE}:/etc/localtime:ro
+      - ${RADARR_DOWNLOADS_DIR}:/movies:rw
+      - ${RADARR_CONFIG_DIR}:/config:rw
+      - ${DELUGE_DOWNLOADS_DIR}:/downloads:rw
+    network_mode: "bridge"
+    restart: unless-stopped
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.radarr_insecure.rule: "Host(`radarr-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.radarr_insecure.entrypoints: "web"
+      traefik.http.routers.radarr.tls: "true"
+      traefik.http.routers.radarr.entrypoints: "web-secure"
+      traefik.http.routers.radarr.rule: "Host(`radarr-internal.${STACK_DOMAIN}`)"
+      traefik.http.services.radarr.loadbalancer.server.port: "7878"
+  ombi:
+    image: linuxserver/ombi
+    container_name: ombi
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los Angeles
+    volumes:
+      - ${OMBI_CONFIG_DIR}:/config
+    ports:
+      - 3579:3579
+    restart: unless-stopped
+    network_mode: "bridge"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.ombi_insecure.rule: "Host(`ombi-internal.${STACK_DOMAIN}`) || Host(`ombi.${STACK_DOMAIN}`)"
+      traefik.http.routers.ombi_insecure.entrypoints: "web"
+      traefik.http.routers.ombi.tls: "true"
+      traefik.http.routers.ombi.entrypoints: "web-secure"
+      traefik.http.routers.ombi.rule: "Host(`ombi-internal.${STACK_DOMAIN}`) || Host(`ombi.${STACK_DOMAIN}`)"
+      traefik.http.services.ombi.loadbalancer.server.port: "3579"
+  deluge_frontend:
+    image: nginx:alpine
+    container_name: deluge_frontend
+    depends_on:
+      - deluge
+    links:
+      - pia:deluge
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.deluge_insecure.rule: "Host(`deluge-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.deluge_insecure.entrypoints: "web"
+      traefik.http.routers.deluge.tls: "true"
+      traefik.http.routers.deluge.entrypoints: "web-secure"
+      traefik.http.routers.deluge.rule: "Host(`deluge-internal.${STACK_DOMAIN}`)"
+      traefik.http.services.deluge.loadbalancer.server.port: "8112"
+    volumes:
+      - ./container/deluge_frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+    network_mode: "bridge"
+    restart: unless-stopped
+  jackett_frontend:
+    image: nginx:alpine
+    container_name: jackett_frontend
+    depends_on:
+      - jackett
+    links:
+      - pia:jackett
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.jackett_insecure.rule: "Host(`jackett-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.jackett_insecure.entrypoints: "web"
+      traefik.http.routers.jackett.tls: "true"
+      traefik.http.routers.jackett.entrypoints: "web-secure"
+      traefik.http.routers.jackett.rule: "Host(`jackett-internal.${STACK_DOMAIN}`)"
+      traefik.http.services.jackett.loadbalancer.server.port: "9117"
+    volumes:
+      - ./container/jackett_frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+    network_mode: bridge
+    restart: unless-stopped
+  nzbget:
+    image: linuxserver/nzbget
+    container_name: nzbget
+    depends_on:
+      - pia
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los Angeles
+    volumes:
+      - ${TIMEZONE_FILE}:/etc/localtime:ro
+      - ${NZBGET_CONFIG_DIR}:/config:rw
+      - ${DELUGE_DOWNLOADS_DIR}:/downloads:rw
+    network_mode: "service:pia"
+    restart: unless-stopped
+ 
+  nzbget_frontend:
+    image: nginx:alpine
+    container_name: nzbget_frontend
+    links:
+      - pia:nzbget
+    depends_on:
+      - nzbget
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.nzbget_insecure.rule: "Host(`nzbget-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.nzbget_insecure.entrypoints: "web"
+      traefik.http.routers.nzbget.tls: "true"
+      traefik.http.routers.nzbget.entrypoints: "web-secure"
+      traefik.http.routers.nzbget.rule: "Host(`nzbget-internal.${STACK_DOMAIN}`)"
+
+      traefik.http.services.nzbget.loadbalancer.server.port: "6789"
+    ports:
+      - 6789:6789
+    volumes:
+      - ./container/nzbget_frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+    network_mode: "bridge"
+    restart: unless-stopped
+  hydra2:
+    image: linuxserver/nzbhydra2
+    container_name: hydra2
+    depends_on:
+      - pia
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los Angeles
+    volumes:
+      - ./container/hydra2/config:/config
+      - ${NZBGET_DOWNLOADS_DIR}:/downloads
+    restart: unless-stopped
+    network_mode: "service:pia"
+
+  hydra2_frontend:
+    image: nginx:alpine
+    container_name: hydra2_frontend
+    links:
+      - pia:hydra2
+    depends_on:
+      - hydra2
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.hydra2_insecure.rule: "Host(`hydra2-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.hydra2_insecure.entrypoints: "web"
+      traefik.http.routers.hydra2.tls: "true"
+      traefik.http.routers.hydra2.entrypoints: "web-secure"
+      traefik.http.routers.hydra2.rule: "Host(`hydra2-internal.${STACK_DOMAIN}`)"
+      traefik.http.services.hydra2.loadbalancer.server.port: "5076"
+    volumes:
+      - ./container/hydra2_frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+    network_mode: "bridge"
+    restart: unless-stopped 
+  bazarr:
+    image: linuxserver/bazarr
+    container_name: bazarr
+    depends_on:
+      - sonarr
+      - radarr
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: UTC
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.bazarr_insecure.rule: "Host(`bazarr-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.bazarr_insecure.entrypoints: "web"
+      traefik.http.routers.bazarr.tls: "true"
+      traefik.http.routers.bazarr.entrypoints: "web-secure"
+      traefik.http.routers.bazarr.rule: "Host(`bazarr-internal.${STACK_DOMAIN}`)"
+      traefik.http.services.bazarr.loadbalancer.server.port: "6767"
+    volumes:
+      - ./container/bazarr/config:/config
+      - ${RADARR_DOWNLOADS_DIR}:/movies:rw
+      - ${SONARR_DOWNLOADS_DIR}:/tv:rw
+    network_mode: "bridge"
+    restart: unless-stopped
+  flaresolverr:
+    image: flaresolverr/flaresolverr
+    container_name: flaresolverr
+    network_mode: "service:pia"
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: "info"
+      CAPTCHA_SOLVER: hcaptcha-solver
+  flaresolverr_frontend:
+    image: nginx:alpine
+    container_name: flaresolverr_frontend
+    depends_on:
+      - flaresolverr
+    links:
+      - pia:flaresolverr
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.flaresolverr_insecure.rule: "Host(`flaresolverr-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.flaresolverr_insecure.entrypoints: "web"
+      traefik.http.routers.flaresolverr.tls: "true"
+      traefik.http.routers.flaresolverr.entrypoints: "web-secure"
+      traefik.http.routers.flaresolverr.rule: "Host(`flaresolverr-internal.${STACK_DOMAIN}`)"
+      traefik.http.services.flaresolverr.loadbalancer.server.port: "8191"
+    volumes:
+      - ./container/flaresolverr_frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+    network_mode: bridge
+    restart: unless-stopped 
+  heimdall:
+    image: linuxserver/heimdall
+    container_name: heimdall
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: UTC
+    volumes:
+      - ./container/heimdall/config:/config
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.heimdall_insecure.rule: "Host(`heimdall-internal.${STACK_DOMAIN}`)"
+      traefik.http.routers.heimdall_insecure.entrypoints: "web"
+      traefik.http.routers.heimdall.tls: "true"
+      traefik.http.routers.heimdall.entrypoints: "web-secure"
+      traefik.http.routers.heimdall.rule: "Host(`heimdall-internal.${STACK_DOMAIN}`)"
+      traefik.http.services.heimdall.loadbalancer.server.port: "80"
+    restart: unless-stopped
+    network_mode: bridge
+  tautulli:
+   image: linuxserver/tautulli
+   container_name: tautulli
+   environment:
+     PUID: 1000
+     PGID: 1000
+     TZ: UTC
+   volumes:
+     - ./container/tautulli/config:/config
+   labels:
+     traefik.enable: "true"
+     traefik.http.routers.tautulli_insecure.rule: "Host(`tautulli-internal.${STACK_DOMAIN}`)"
+     traefik.http.routers.tautulli_insecure.entrypoints: "web"
+     traefik.http.routers.tautulli.tls: "true"
+     traefik.http.routers.tautulli.entrypoints: "web-secure"
+     traefik.http.routers.tautulli.rule: "Host(`tautulli-internal.${STACK_DOMAIN}`)"
+     traefik.http.services.tautulli.loadbalancer.server.port: "8181"
+

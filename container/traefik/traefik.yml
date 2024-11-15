@@ -1,0 +1,11 @@
+tls:
+  certificates:
+    - certFile: /etc/ssl/docker.crt
+      keyFile: /etc/ssl/docker.key
+      stores:
+        - default
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/ssl/docker.crt
+        keyFile: /etc/ssl/docker.key
